@@ -1,10 +1,17 @@
 # ARJAN website — delivery for merge into the Mac repo
 
-This folder is **not** part of this repo's actual site. It is a parking spot for three
+## ⚠️ URGENT: fix #4 below unblocks the owner's own admin login (reported failing live right now)
+
+This folder is **not** part of this repo's actual site. It is a parking spot for
 verified, ready-to-merge fixes to the real ARJAN project, which lives only on the
 owner's Mac at `infra/cloudflare-preview` (never pushed to GitHub, so this session
-had no repo to push a proper PR against). This was the best available option after
-two blockers were hit and confirmed (see bottom).
+had no repo to push a proper PR against).
+
+**Status update:** fixes 1–3 below are already confirmed LIVE on arjandesign.com
+(verified directly against the real Cloudflare account and the live domain) — someone
+already applied and deployed them. Fix 4 is new and not yet applied anywhere; it is
+urgent because the owner's own first admin-login attempt is failing because of it,
+right now, live.
 
 ## What to do with this
 
@@ -16,15 +23,70 @@ cp arjan-website-delivery-20261016/files/public__headers public/_headers
 cp arjan-website-delivery-20261016/files/next.config.ts next.config.ts
 cp arjan-website-delivery-20261016/files/wrangler.production.jsonc wrangler.production.jsonc
 cp arjan-website-delivery-20261016/files/docs__launch-status.md docs/launch-status.md
+cp arjan-website-delivery-20261016/files/workers-leads-src__env.ts workers/leads/src/env.ts
+cp arjan-website-delivery-20261016/files/workers-leads-src__admin-session.ts workers/leads/src/admin-session.ts
 ```
 
-Then review the diff, run `npm run lint && npm run type-check && npm run cf:preflight && npm run cf:build`
-and the test suite, and commit when satisfied. A Mac-side Claude Code session with
-filesystem access can do this mechanically from this README without further
-input — it only touches these 4 files, none of which overlap the uncommitted
-changes flagged in the handoff doc (`src/lib/leads/build.ts`, `workers/leads/src/alerts.ts`).
+(`admin.ts` also changed — two lines only. Apply by hand or diff against this repo's
+own workers/leads/src/admin.ts, which is unchanged from baseline otherwise:
+1. Import line: add `isSameOrigin` to the existing `import { adminSession } from "./admin-session"` line.
+2. In the `/admin/leads/:id` POST handler, replace
+   `if (request.headers.get("origin") !== url.origin) return message(403, ...)`
+   with `if (!isSameOrigin(request, url.origin)) return message(403, ...)`.)
 
-## Fix 1 — baseline security headers for the public site
+**custom-worker.ts — DO NOT COPY A FULL FILE FOR THIS ONE.** Confirmed via the
+Cloudflare connector (read-only `workers_get_worker_code`) that the live deployed
+`custom-worker.ts` has already diverged from this session's baseline: it now wraps
+every response in a `harden(...)` call that doesn't exist in this delivery's copy.
+Overwriting it whole would silently drop that. Instead apply this exact, minimal
+change by hand (same idea as the other two files: accept `Sec-Fetch-Site: same-origin`
+as an alternative to an exact Origin match):
+
+```ts
+// Add this function near the top of custom-worker.ts, after the existing `refuse` definition:
+function isSameOrigin(request: Request, origin: string): boolean {
+  if (request.headers.get("origin") === origin) return true;
+  return request.headers.get("sec-fetch-site") === "same-origin";
+}
+
+// Then change this one line inside the fetch handler:
+//   OLD: if (request.method === "POST" && request.headers.get("origin") !== new URL(request.url).origin) return refuse(403, "forbidden");
+//   NEW:
+if (request.method === "POST" && !isSameOrigin(request, new URL(request.url).origin)) return refuse(403, "forbidden");
+```
+
+If the live file already wraps the return in `harden(...)`, keep that wrapper —
+only the condition inside the `if` changes.
+
+Then review, run `npm run lint && npm run type-check && npm run cf:preflight && npm run cf:build`
+and the test suite, and deploy.
+
+## Fix 4 — Sec-Fetch-Site fallback for the same-origin check (URGENT, not yet live)
+
+Reported live: the owner's own first admin-login attempt was refused (403
+`{"ok":false,"error":"forbidden"}`) submitting the login form on arjandesign.com,
+reproduced in a fresh Incognito window too (rules out extensions/translate as the
+cause). The deployed Worker only accepts an exact `Origin` header match for POSTs
+to `/admin*`, `/api/leads`, `/api/uploads`; some browsers/privacy configurations
+(e.g. Brave's Shields, suspected here) omit or rewrite Origin on an otherwise
+legitimate same-site form POST.
+
+`Sec-Fetch-Site` is a Fetch Metadata request header every current browser (Chrome,
+Firefox, Safari, Edge, Brave) sets and rarely strips; `"same-origin"` there is at
+least as strong a same-site signal as a matching Origin header. This only widens
+what's accepted as same-site — it never accepts a genuinely cross-site request,
+since that gets `Sec-Fetch-Site: cross-site`, not `same-origin`. Applied in three
+places that previously checked Origin alone: `custom-worker.ts` (the website
+Worker's outer gate for all lead/admin routes — apply by hand, see above),
+`workers/leads/src/env.ts`'s `originAllowed` (the public `/api/leads` and
+`/api/uploads` gate), and `workers/leads/src/admin-session.ts` (the admin
+login/verify/save gate, now exported as `isSameOrigin` and reused by `admin.ts`'s
+lead-update endpoint too).
+
+Verified: lint, type-check, all 80 `workers/leads/test/*.test.mjs` tests, `cf:build`,
+and `cf:preflight` all still pass with this change. Not yet deployed anywhere.
+
+## Fix 1 — baseline security headers for the public site (CONFIRMED LIVE)
 
 Public pages (served from Workers Static Assets) shipped with no hardening
 headers beyond Cloudflare/Next defaults, while `/admin` already had a strict
@@ -32,65 +94,25 @@ CSP via the Worker. `public/_headers` now adds, for all routes: X-Content-Type-O
 Referrer-Policy, X-Frame-Options, a minimal Permissions-Policy, and a conservative
 HSTS (180 days, no includeSubDomains/preload — kept reversible).
 
-## Fix 2 — www.arjandesign.com prepared to redirect to the apex
+## Fix 2 — www.arjandesign.com redirect to the apex (CONFIRMED LIVE)
 
-Confirmed live: `www.arjandesign.com` currently has **no DNS record at all**
-(not just a missing redirect) — adding DNS in Cloudflare is still needed and is
-outside what this session can do. But the production Worker route only matched
-`arjandesign.com/*`, so even after DNS exists, requests to www would never reach
-this Worker. Fixed in code, ready for when DNS is added:
+`www.arjandesign.com` now has DNS and 308-redirects to the apex, path preserved.
+Confirmed live today: `https://www.arjandesign.com/ar/services` → 308 to
+`https://arjandesign.com/ar/services`.
 
-- `wrangler.production.jsonc`: added a second route for `www.arjandesign.com/*`
-  on the same zone.
-- `next.config.ts`: added a host-matched 308 redirect from www to the apex,
-  path-preserved, ahead of the existing locale redirects.
-
-## Fix 3 — docs/launch-status.md was describing an abandoned plan as current
+## Fix 3 — docs/launch-status.md was describing an abandoned plan as current (CONFIRMED pushed; docs-only, nothing to "deploy")
 
 The file still presented Cloudflare Access/Zero Trust as the active admin-protection
-plan ("Configure a narrow owner/staff policy...", "owner decision is required") and
-showed a stale 70-test count. In fact the owner declined Access/Zero Trust billing
-outright — a closed decision, not a pending one — and production admin protection
-is the Supabase PKCE email-link flow, already implemented and deployed. The Access
-material was moved into a clearly labeled "Superseded" section (kept for history,
-not deleted), and today's independently verified live findings were folded in.
-Docs only, no code changes.
+plan and showed a stale 70-test count. Moved into a clearly labeled "Superseded"
+section (kept for history, not deleted); today's live findings folded in.
 
-## Verified (today, by this session)
+## Confirmed blockers hit along the way
 
-- `npm ci`, `npm audit --omit=dev` (0 vulnerabilities), `lint`, `type-check`,
-  all 80 `workers/leads/test/*.test.mjs` tests, `next build`, `npm run cf:build`
-  (the real webpack+OpenNext production pipeline), and `cf:preflight` all pass
-  with all three fixes applied, on an isolated copy of the Mac handoff export.
-- The www redirect was verified locally with `next dev` + a spoofed Host header
-  (www has no DNS yet to test it live): `www.arjandesign.com/ar/services` →
-  308 to `https://arjandesign.com/ar/services`; apex behavior unchanged.
-- Live on `arjandesign.com` today (unrelated to these fixes, verified separately):
-  `/ar` and `/en` serve the real ARJAN site (200), `/admin` redirects anonymous
-  visitors to `/admin/login` with no customer data (303, private/no-store/noindex),
-  robots.txt/sitemap.xml/canonical/hreflang/OG/JSON-LD are all correct, the
-  projects page shows no leaked sample/dev content, the privacy page makes no
-  false auto-deletion promise, and admin-login security edge cases (non-allowlisted
-  email, wrong Origin, wrong Content-Type) were exercised live and rejected
-  correctly — without touching the real owner account.
-- A full synthetic "ARJAN QA TEST" lead submission (AR + EN, with a test PDF
-  attachment) was attempted end-to-end via real browser automation against the
-  live site, both headless and headful (Xvfb). Every step up to Cloudflare
-  Turnstile worked correctly. Turnstile itself refused the check — confirmed to
-  be because this cloud environment's outbound traffic is forced through a single
-  corporate proxy, which is exactly the signal Turnstile is designed to catch.
-  **No synthetic lead was created in production as a result**; this was not
-  bypassed. A real submission still needs to run from a normal, non-proxied
-  network (any ordinary device off this specific sandboxed environment).
-
-## Confirmed blockers hit while trying to avoid handing over patch files
-
-- **Deploying any of these fixes**: needs `wrangler login` / a Cloudflare API token.
-  No Cloudflare connector or credential exists anywhere in this session's tools.
+- **Deploying fix 4**: needs `wrangler login` / a Cloudflare API token, or someone
+  with deploy access applying the targeted change above. This session's Cloudflare
+  connector is read-only for Workers (`workers_list`, `workers_get_worker`,
+  `workers_get_worker_code` only — no deploy/put tool) and has no DNS tool.
 - **Creating a dedicated GitHub repo** for a clean PR: `mcp__github__create_repository`
-  was called and returned `403 Resource not accessible by integration` — this
-  session's GitHub App cannot create repositories, only operate within ones
-  already granted. That is why this landed here instead, on an isolated branch
-  of an unrelated repo this session already had push access to.
-- Raw `.patch` files (`git am`-able) were also sent directly to the owner in
-  chat as a fallback, in case this repo isn't convenient to pull from.
+  returned `403 Resource not accessible by integration`.
+- Raw `.patch` files (`git am`-able) for all four fixes were also sent directly to
+  the owner in chat.
