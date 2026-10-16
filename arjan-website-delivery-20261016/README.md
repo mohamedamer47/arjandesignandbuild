@@ -1,6 +1,6 @@
 # ARJAN website — delivery for merge into the Mac repo
 
-This folder is **not** part of this repo's actual site. It is a parking spot for two
+This folder is **not** part of this repo's actual site. It is a parking spot for three
 verified, ready-to-merge fixes to the real ARJAN project, which lives only on the
 owner's Mac at `infra/cloudflare-preview` (never pushed to GitHub, so this session
 had no repo to push a proper PR against). This was the best available option after
@@ -15,12 +15,13 @@ uncommitted changes left exactly as they are:
 cp arjan-website-delivery-20261016/files/public__headers public/_headers
 cp arjan-website-delivery-20261016/files/next.config.ts next.config.ts
 cp arjan-website-delivery-20261016/files/wrangler.production.jsonc wrangler.production.jsonc
+cp arjan-website-delivery-20261016/files/docs__launch-status.md docs/launch-status.md
 ```
 
 Then review the diff, run `npm run lint && npm run type-check && npm run cf:preflight && npm run cf:build`
 and the test suite, and commit when satisfied. A Mac-side Claude Code session with
 filesystem access can do this mechanically from this README without further
-input — it only touches these 3 files, none of which overlap the uncommitted
+input — it only touches these 4 files, none of which overlap the uncommitted
 changes flagged in the handoff doc (`src/lib/leads/build.ts`, `workers/leads/src/alerts.ts`).
 
 ## Fix 1 — baseline security headers for the public site
@@ -44,16 +45,27 @@ this Worker. Fixed in code, ready for when DNS is added:
 - `next.config.ts`: added a host-matched 308 redirect from www to the apex,
   path-preserved, ahead of the existing locale redirects.
 
+## Fix 3 — docs/launch-status.md was describing an abandoned plan as current
+
+The file still presented Cloudflare Access/Zero Trust as the active admin-protection
+plan ("Configure a narrow owner/staff policy...", "owner decision is required") and
+showed a stale 70-test count. In fact the owner declined Access/Zero Trust billing
+outright — a closed decision, not a pending one — and production admin protection
+is the Supabase PKCE email-link flow, already implemented and deployed. The Access
+material was moved into a clearly labeled "Superseded" section (kept for history,
+not deleted), and today's independently verified live findings were folded in.
+Docs only, no code changes.
+
 ## Verified (today, by this session)
 
 - `npm ci`, `npm audit --omit=dev` (0 vulnerabilities), `lint`, `type-check`,
   all 80 `workers/leads/test/*.test.mjs` tests, `next build`, `npm run cf:build`
   (the real webpack+OpenNext production pipeline), and `cf:preflight` all pass
-  with both fixes applied, on an isolated copy of the Mac handoff export.
+  with all three fixes applied, on an isolated copy of the Mac handoff export.
 - The www redirect was verified locally with `next dev` + a spoofed Host header
   (www has no DNS yet to test it live): `www.arjandesign.com/ar/services` →
   308 to `https://arjandesign.com/ar/services`; apex behavior unchanged.
-- Live on `arjandesign.com` today (unrelated to these 2 fixes, verified separately):
+- Live on `arjandesign.com` today (unrelated to these fixes, verified separately):
   `/ar` and `/en` serve the real ARJAN site (200), `/admin` redirects anonymous
   visitors to `/admin/login` with no customer data (303, private/no-store/noindex),
   robots.txt/sitemap.xml/canonical/hreflang/OG/JSON-LD are all correct, the
@@ -73,7 +85,7 @@ this Worker. Fixed in code, ready for when DNS is added:
 
 ## Confirmed blockers hit while trying to avoid handing over patch files
 
-- **Deploying either fix**: needs `wrangler login` / a Cloudflare API token.
+- **Deploying any of these fixes**: needs `wrangler login` / a Cloudflare API token.
   No Cloudflare connector or credential exists anywhere in this session's tools.
 - **Creating a dedicated GitHub repo** for a clean PR: `mcp__github__create_repository`
   was called and returned `403 Resource not accessible by integration` — this
