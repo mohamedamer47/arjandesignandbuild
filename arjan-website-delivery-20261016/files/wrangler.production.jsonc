@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "arjan-website-production",
+  "main": "custom-worker.ts",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "assets": { "directory": ".open-next/assets", "binding": "ASSETS" },
+  "services": [{ "binding": "LEADS", "service": "arjan-leads-production" }],
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    { "pattern": "arjandesign.com/*", "zone_name": "arjandesign.com" },
+    { "pattern": "www.arjandesign.com/*", "zone_name": "arjandesign.com" }
+  ],
+  "observability": { "enabled": true },
+  "send_metrics": false
+}
