@@ -40,16 +40,49 @@ function page(text = "", email = "", verify = false, status = 200) {
   return new Response(`<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>أرچان | دخول الإدارة</title><style>body{background:#f3f0e9;color:#292b26;font:17px/1.8 system-ui;margin:0}main{max-width:440px;margin:10vh auto;padding:28px}h1{font-size:28px;font-weight:500}label{display:block;margin-top:20px}input,button{box-sizing:border-box;width:100%;padding:12px;font:inherit;border:1px solid #bbb;background:#fcfbf7}button{background:#47523e;color:white;margin-top:24px;cursor:pointer}a{color:#47523e}input:focus,button:focus{outline:2px solid #697957;outline-offset:3px}</style><main><small>ARJAN · DESIGN & BUILD</small><h1>دخول لوحة العملاء</h1><p>${escape(text || "الدخول متاح لحساب الإدارة المعتمد فقط.")}</p><form method="post" action="/admin/${verify ? "verify" : "login"}"><label>البريد الإلكتروني<input name="email" type="email" dir="ltr" required maxlength="254" autocomplete="email" value="${escape(email)}" ${verify ? "readonly" : ""}></label>${verify ? '<label>كود الدخول<input name="code" type="text" dir="ltr" inputmode="numeric" pattern="[0-9]{6,10}" minlength="6" maxlength="10" autocomplete="one-time-code" required></label>' : ""}<button>${verify ? "دخول" : "إرسال رابط الدخول"}</button></form>${verify ? '<p><a href="/admin/login">طلب كود جديد</a></p>' : ""}<p><a href="/ar">العودة للموقع</a></p></main></html>`, { status, headers: { ...sessionHeaders, "content-type": "text/html; charset=utf-8" } });
 }
 
+/**
+ * A plain GET to this link, as done by an email client's or provider's automatic security
+ * scanner, must not by itself consume the one-time code. Rendering a page with a button that
+ * POSTs the code does that: scanners fetch the URL but don't submit forms, so the code stays
+ * valid for the person who actually clicks.
+ */
+function confirmPage(code: string) {
+  return new Response(`<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>أرچان | تأكيد الدخول</title><style>body{background:#f3f0e9;color:#292b26;font:17px/1.8 system-ui;margin:0}main{max-width:440px;margin:10vh auto;padding:28px}h1{font-size:28px;font-weight:500}button{box-sizing:border-box;width:100%;padding:12px;font:inherit;border:1px solid #bbb;background:#47523e;color:white;margin-top:24px;cursor:pointer}button:focus{outline:2px solid #697957;outline-offset:3px}</style><main><small>ARJAN · DESIGN & BUILD</small><h1>تأكيد الدخول</h1><p>اضغط الزر أدناه لإكمال تسجيل الدخول إلى لوحة العملاء.</p><form method="post" action="/admin/callback"><input type="hidden" name="code" value="${escape(code)}"><button>تأكيد الدخول</button></form></main></html>`, { status: 200, headers: { ...sessionHeaders, "content-type": "text/html; charset=utf-8" } });
+}
+
+/** Bounded form-body reader shared by every POST handler here; null on anything malformed. */
+async function readForm(request: Request): Promise<URLSearchParams | null> {
+  if (request.headers.get("content-type")?.split(";")[0] !== "application/x-www-form-urlencoded") return null;
+  if (Number(request.headers.get("content-length")) > 2048) return null;
+  const reader = request.body?.getReader();
+  if (!reader) return null;
+  let body = ""; let size = 0;
+  const decoder = new TextDecoder();
+  while (true) { const { value, done } = await reader.read(); if (done) break; size += value.byteLength; if (size > 2048) { await reader.cancel(); return null; } body += decoder.decode(value, { stream: true }); }
+  body += decoder.decode();
+  return new URLSearchParams(body);
+}
+
 /** All login endpoints use same-origin POSTs, small bounded bodies, and a separate IP limiter key. */
 export async function adminSession(request: Request, env: Env): Promise<Response | null> {
   const url = new URL(request.url);
   if (!["/admin/login", "/admin/verify", "/admin/callback", "/admin/logout"].includes(url.pathname)) return null;
   if (url.pathname === "/admin/callback") {
-    if (request.method !== "GET" || url.protocol !== "https:" || !env.ALLOWED_ORIGINS.split(",").map((s) => s.trim()).includes(url.origin)) return page("طلب غير مسموح.", "", false, 403);
+    if (url.protocol !== "https:" || !env.ALLOWED_ORIGINS.split(",").map((s) => s.trim()).includes(url.origin)) return page("طلب غير مسموح.", "", false, 403);
     const flow = (request.headers.get("cookie") ?? "").split(";").map((s) => s.trim()).find((s) => s.startsWith(`${FLOW_COOKIE}=`))?.slice(FLOW_COOKIE.length + 1);
     const [verifier, encodedEmail] = (flow ?? "").split(":");
-    const code = url.searchParams.get("code") ?? "";
-    if (!verifier || !/^[A-Za-z0-9_-]{43}$/.test(verifier) || !encodedEmail || !/^[A-Za-z0-9_-]{1,256}$/.test(code)) return page("الرابط انتهى أو فُتح في متصفح آخر. اطلب رابطًا جديدًا وافتحه في نفس المتصفح.", "", false, 400);
+    if (!verifier || !/^[A-Za-z0-9_-]{43}$/.test(verifier) || !encodedEmail) return page("الرابط انتهى أو فُتح في متصفح آخر. اطلب رابطًا جديدًا وافتحه في نفس المتصفح.", "", false, 400);
+    if (request.method === "GET") {
+      const code = url.searchParams.get("code") ?? "";
+      if (!/^[A-Za-z0-9_-]{1,256}$/.test(code)) return page("الرابط انتهى أو فُتح في متصفح آخر. اطلب رابطًا جديدًا وافتحه في نفس المتصفح.", "", false, 400);
+      // A GET only shows the confirm button; it never touches Supabase, so an automated
+      // scanner that fetches this URL cannot consume the one-time code.
+      return confirmPage(code);
+    }
+    if (request.method !== "POST" || !isSameOrigin(request, url.origin)) return page("طلب غير مسموح.", "", false, 403);
+    const form = await readForm(request);
+    const code = form?.get("code") ?? "";
+    if (!form || !/^[A-Za-z0-9_-]{1,256}$/.test(code)) return page("الرابط انتهى أو فُتح في متصفح آخر. اطلب رابطًا جديدًا وافتحه في نفس المتصفح.", "", false, 400);
     try {
       const email = decodeURIComponent(encodedEmail);
       if (!staffEmails(env).includes(email) || !env.SUPABASE_SECRET_KEY) return page("الحساب غير مصرح له.", "", false, 403);
@@ -79,7 +112,7 @@ export async function adminSession(request: Request, env: Env): Promise<Response
   if (!env.SUPABASE_SECRET_KEY || !staffEmails(env).length) return page("الدخول لم يُفعّل بعد.", "", false, 503);
   try {
     const limited = await env.LEADS_LIMITER.limit({ key: `admin-auth:${request.headers.get("cf-connecting-ip") ?? "unknown"}` });
-    if (!limited.success) return page("محاولات كثيرة. انتظر قليلاً ثم حاول مجدداً.", "", false, 429);
+    if (!limited.success) return page("محاولات كثيرة. انتظر قليلًا ثم حاول مجددًا.", "", false, 429);
     if (request.headers.get("content-type")?.split(";")[0] !== "application/x-www-form-urlencoded") return page("طلب غير صالح.", "", false, 415);
     if (Number(request.headers.get("content-length")) > 2048) return page("طلب غير صالح.", "", false, 413);
     const reader = request.body?.getReader(); let body = ""; let size = 0;
